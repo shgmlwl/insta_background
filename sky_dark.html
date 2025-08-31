@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.2/p5.min.js"></script>
+    <title>time_sky</title>
+    <style>
+      * {
+        padding: 0;
+        margin: 0;
+        box-sizing: border-box;
+      }
+    </style>
+  </head>
+  <body>
+    <script>
+      new p5((p) => {
+        /* ===== 배경 이미지 (선택) ===== */
+        const BG_URL = null; // 예: "./my-sky-photo.jpg"; 없으면 null
+        let bg = null;
+
+        /* ===== 하늘 그라데이션(백업) ===== */
+        let top_gr, bottom_gr;
+
+        /* ===== 구름 관리 ===== */
+        let cloud_array = [];
+        const max_cloud = 4; // 화면 내 최대 구름 수
+        const cloud_s = 9; // 프레임당 새 구름 생성 수
+        const cloud_min = 10; // 구름 알파 최소
+        const cloud_max = 5; // 과한 백색화 방지
+
+        /* ===== 팔레트 (밝은 흰색은 하이라이트로만 사용) ===== */
+        const PALETTE = [
+          [236, 237, 255], // very light cool
+          [210, 200, 255], // mid cool
+          [196, 216, 246], // deeper cool
+          [238, 222, 246], // soft gray
+          [175, 246, 236], // warm highlight tone
+          [195, 226, 255],
+        ];
+        const PURE_WHITE = [255, 255, 255]; // 하이라이트 전용
+
+        /* ===== Tuft(방울 덩어리) & 방울 분포 다이얼 ===== */
+        const T_COUNT_MIN = 1; // 한 구름당 덩어리 최소 개수
+        const T_COUNT_MAX = 2; // 한 구름당 덩어리 최대 개수
+        const T_RANGE = 0.04; // 덩어리 영향 반경 (값↑ = 더 넓게 부풀어짐)
+        const T_STRENGTH = 0.6; // 팽창 강도 (값↑ = 더 많이 불룩)
+        const T_EXTRA_PROB = 0.35; // 중심부 한 번 더 찍기 확률
+        const T_EXTRA_SIZE = 0.9; // 보강 찍기 크기 배율
+
+        const DROP_HEAVY_POWER = 0.9; // randomPow 지수 (값↑ = 작은 방울 많아짐)
+        const DROP_BIG_CHANCE = 0; // 큰 방울이 나올 확률
+        const DROP_BIG_MIN = 0.2; // 큰 방울 배율 최소
+        const DROP_BIG_MAX = 0.1; // 큰 방울 배율 최대
+
+        /* --- 이미지 미리 로드 --- */
+        p.preload = () => {
+          if (BG_URL) {
+            bg = p.loadImage(
+              BG_URL,
+              () => {},
+              () => {
+                bg = null;
+              }
+            );
+          }
+        };
+
+        p.setup = () => {
+          p.createCanvas(p.windowWidth, p.windowHeight);
+          p.pixelDensity(1);
+          p.noiseDetail(3, 0.5);
+          pick_pa(); // 그라데이션 팔레트
+        };
+
+        p.windowResized = () => {
+          p.resizeCanvas(p.windowWidth, p.windowHeight);
+        };
+
+        p.draw = () => {
+          draw_background();
+
+          // 구름 업데이트 + 그리기
+          for (let i = cloud_array.length - 1; i >= 0; i--) {
+            const cloud_c = cloud_array[i];
+            cloud_c.update();
+            cloud_c.draw(); // 내부는 BLEND로 색을 찍음(팔레트가 하얗게 날아가지 않게)
+            if (cloud_c.offscreen()) cloud_array.splice(i, 1);
+          }
+
+          // 새 구름 생성 (개수 제한 고려)
+          for (let i = 0; i < cloud_s && cloud_array.length < max_cloud; i++) {
+            cloud_array.push(new Cloud());
+          }
+        };
+
+        /* ===== 유틸: bias 분포(작은 값은 많고 큰 값은 드물게) ===== */
+        function randomPow(min, max, power) {
+          return p.lerp(min, max, Math.pow(p.random(), power));
+        }
+
+        /* ====== Cloud (다양성 + 팔레트 색 보이게) ====== */
+        class Cloud {
+          constructor() {
+            this.dir = p.random([1, -1]); // 좌우 방향
+            this.speed = p.random(0.2, 3); // 속도
+            this.x = this.dir < 0 ? p.width + 120 : -120;
+
+            // 위쪽에만 몰리지 않게 분포 확대(상/중/하 밴드)
+            const bandPick = p.random();
+            if (bandPick < 0.35)
+              this.y = p.random(p.height * 0.1, p.height * 0.35);
+            else if (bandPick < 0.75)
+              this.y = p.random(p.height * 0.3, p.height * 0.6);
+            else this.y = p.random(p.height * 0.55, p.height * 0.8);
+
+            this.scale = p.random(0.9, 1.8);
+            this.alpha = p.random(cloud_min, cloud_max);
+            this.phase = p.random(1000); // 흔들림 위상
+            this.seed = p.random(10000); // 질감 고정용 씨드
+
+            // 스타일 프로파일: 가늘게 / 두툼 / 퐁실 중 랜덤
+            const styles = [
+              {
+                base: [18, 24],
+                count: [24, 40],
+                len: [2.2, 3.4],
+                ry: [0.55, 0.75],
+              }, // wispy
+              {
+                base: [24, 30],
+                count: [32, 56],
+                len: [1.6, 2.3],
+                ry: [0.75, 0.95],
+              }, // chunky
+              {
+                base: [22, 28],
+                count: [28, 44],
+                len: [1.8, 2.6],
+                ry: [0.65, 0.85],
+              }, // puffy
+            ];
+            const S = styles[p.floor(p.random(styles.length))];
+
+            this.baseS = p.random(S.base[0], S.base[1]) * this.scale; // 기본 붓 크기
+            this.count = p.floor(p.random(S.count[0], S.count[1])); // 붓자국 개수
+            this.lenMul = p.random(S.len[0], S.len[1]); // 길이 배수
+            this.ryMul = p.random(S.ry[0], S.ry[1]); // 납작함 정도
+
+            this.angle = p.radians(p.random(-38, -12)); // 기본 대각
+            this.curve = p.random(-0.25, 0.25); // 구름이 살짝 휘도록(곡률)
+
+            // 방울(러프) 중심들
+            this.tufts = [];
+            const tuftCount = p.floor(p.random(T_COUNT_MIN, T_COUNT_MAX + 1));
+            for (let k = 0; k < tuftCount; k++) {
+              this.tufts.push(p.random(0.15, 0.9)); // 0..1 (구름 길이 축)
+            }
+
+            // 이 구름의 기본 색 두 개(순수 흰색 제외) + 하이라이트
+            this.cA = pickColor();
+            this.cB = pickColor();
+            this.cH = PURE_WHITE;
+          }
+
+          update() {
+            this.x += this.dir * this.speed;
+            // 수직 드리프트(층마다 다르게)
+            const driftAmp = p.map(
+              this.y,
+              p.height * 0.1,
+              p.height * 0.8,
+              0.08,
+              0.18
+            );
+            this.y += p.sin(p.frameCount * 0.01 + this.phase) * driftAmp;
+          }
+
+          // 팔레트 기반 붓터치(라디얼 그라디언트)로 찍어내기
+          draw() {
+            const cx = this.x,
+              cy = this.y;
+
+            p.push();
+            p.blendMode(p.BLEND); // 색이 보이게 일반 합성
+            for (let i = 0; i < this.count; i++) {
+              const t = i / (this.count - 1); // 0..1
+
+              // 현재 지점의 진행 각(곡률 반영)
+              const ang = this.angle + (t - 0.5) * this.curve;
+              const dirX = Math.cos(ang);
+              const dirY = Math.sin(ang);
+
+              // 위치 노이즈
+              const nx = p.noise(this.seed + i * 0.09, p.frameCount * 0.002);
+              const ny = p.noise(
+                this.seed + 100 + i * 0.11,
+                p.frameCount * 0.002
+              );
+
+              // 중심축을 따라 길게, 옆으로는 짧게 분포
+              const along = p.lerp(
+                -this.baseS * 2.4 * this.lenMul,
+                this.baseS * 2.4 * this.lenMul,
+                t
+              );
+              let across = (ny - 0.5) * this.baseS * 1.0;
+              const jitterX = (nx - 0.5) * this.baseS * 0.6;
+              const jitterY = (ny - 0.5) * this.baseS * 0.4;
+
+              // 덩어리(러프): 선택된 t 지점 근처에서 부풀리기
+              let tuftPush = 0;
+              for (const tt of this.tufts) {
+                const d = Math.abs(t - tt);
+                if (d < T_RANGE) tuftPush += 1 - d / T_RANGE; // 0..1
+              }
+              across += tuftPush * this.baseS * T_STRENGTH; // 강도 다이얼
+
+              const ox = along * dirX + across * -dirY + jitterX;
+              const oy = along * dirY + across * dirX + jitterY;
+
+              // 색 블렌딩(순수 흰색 비중 ↓)
+              const u = 0.25 + 0.75 * p.noise(this.seed * 4 + i * 0.08);
+              let col = mixRGB(this.cA, this.cB, u);
+              const light =
+                0.5 + 0.5 * (along / (this.baseS * 2.4 * this.lenMul)); // -1..1 → 0..1
+              col = mixRGB(col, this.cH, light * 0.1); // 하이라이트는 살짝만
+
+              // 붓 크기: heavy-tail(작은 게 많고 가끔 큰 게 튀게)
+              let sizeBias = randomPow(0.6, 1.6, DROP_HEAVY_POWER);
+              if (p.random() < DROP_BIG_CHANCE)
+                sizeBias *= p.random(DROP_BIG_MIN, DROP_BIG_MAX);
+              const rx =
+                this.baseS *
+                (0.7 + p.noise(this.seed * 2 + i * 0.13) * 0.9) *
+                sizeBias;
+              const ry = rx * this.ryMul * p.random(0.75, 1.22); // 얄쌍/두툼 다양화
+              let a =
+                this.alpha * (0.45 + 0.55 * p.noise(this.seed * 3 + i * 0.07));
+              a *= p.lerp(0.9, 1.15, p.random()); // 미세 가감
+
+              dabColor(cx + ox, cy + oy, rx, ry, col, a);
+
+              // 중심부 보강(한 번 더 찍기)
+              if (tuftPush > 0.8 && p.random() < T_EXTRA_PROB) {
+                dabColor(
+                  cx + ox + p.random(-3, 3),
+                  cy + oy + p.random(-2, 2),
+                  rx * T_EXTRA_SIZE,
+                  ry * T_EXTRA_SIZE,
+                  col,
+                  a
+                );
+              }
+            }
+            p.pop();
+          }
+
+          offscreen() {
+            return this.x < -170 || this.x > p.width + 170;
+          }
+        }
+
+        /* ====== 색 유틸 ====== */
+        function pickColor() {
+          return PALETTE[p.floor(p.random(PALETTE.length))];
+        }
+        function mixRGB(a, b, t) {
+          return [
+            Math.round(p.lerp(a[0], b[0], t)),
+            Math.round(p.lerp(a[1], b[1], t)),
+            Math.round(p.lerp(a[2], b[2], t)),
+          ];
+        }
+
+        /* ====== 라디얼 그라디언트 붓자국 (컬러 지원) ====== */
+        function dabColor(x, y, rx, ry, rgb, alpha = 180) {
+          const ctx = p.drawingContext;
+          const r = Math.max(rx, ry);
+          const [R, G, B] = rgb;
+
+          const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+          g.addColorStop(0.0, `rgba(${R},${G},${B},${alpha / 255})`);
+          g.addColorStop(0.7, `rgba(${R},${G},${B},${(alpha / 255) * 0.5})`);
+          g.addColorStop(1.0, `rgba(${R},${G},${B},0)`);
+
+          ctx.save();
+          ctx.fillStyle = g;
+          ctx.beginPath();
+          ctx.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        }
+
+        /* ====== 하늘 그라데이션 (배경 이미지 없을 때) ====== */
+        function pick_pa() {
+          const top = p.color(72, 50, 130);
+          const bottom = p.color(255, 170, 130);
+          top_gr = top;
+          bottom_gr = bottom;
+        }
+
+        function draw_sky() {
+          for (let i = 0; i < p.height; i++) {
+            const t = i / (p.height - 1);
+            const c = p.lerpColor(top_gr, bottom_gr, t);
+            p.stroke(c);
+            p.line(0, i, p.width, i);
+          }
+        }
+
+        /* ====== 배경 그리기 (이미지 있으면 COVER로, 없으면 그라데이션) ====== */
+        function draw_background() {
+          if (bg && bg.width > 0) {
+            const cw = p.width,
+              ch = p.height;
+            const iw = bg.width,
+              ih = bg.height;
+            const scale = Math.max(cw / iw, ch / ih);
+            const w = iw * scale,
+              h = ih * scale;
+            const x = (cw - w) / 2,
+              y = (ch - h) / 2;
+            p.image(bg, x, y, w, h);
+          } else {
+            draw_sky();
+          }
+        }
+      });
+    </script>
+  </body>
+</html>
